@@ -5,6 +5,10 @@ import os
 import sys
 import tempfile
 from dotenv import load_dotenv
+import torch
+from torchvision import transforms
+from PIL import Image
+
 
 from flask import Flask, request, abort, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -27,6 +31,12 @@ import cv2
 import torch
 from utils.plots import Annotator, colors
 
+
+import torch
+import cv2
+import pandas as pd
+import numpy as np
+
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_host=1, x_proto=1)
 
@@ -48,21 +58,28 @@ static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
 
 ### YOLOv5 ###
 # Setup
-weights, view_img, save_txt, imgsz = 'yolov5s.pt', False, False, 640
-conf_thres = 0.25
-iou_thres = 0.45
-classes = None
-agnostic_nms = False
-save_conf = False
-save_img = True
-line_thickness = 3
+# weights, view_img, save_txt, imgsz = 'yolov5s.pt', False, False, 640
+# conf_thres = 0.25
+# iou_thres = 0.45
+# classes = None
+# agnostic_nms = False
+# save_conf = False
+# save_img = True
+# line_thickness = 3
 
 # Directories
 save_dir = 'static/tmp/'
 
 # Load model
-model = torch.hub.load('./', 'custom', path='yolov5s.pt', source='local', force_reload=True)
-# model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+model_path = "dataset_model_81.pt"  # Modify this path accordingly
+model = torch.load(model_path)
+model.eval()
+
+test_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
 
 # function for create tmp dir for download content
 def make_static_tmp_dir():
@@ -143,6 +160,9 @@ def handle_sticker_message(event):
     )
 
 
+
+class_labels = {0: 'gingivitis', 1: 'healthy'}
+
 # Other Message Type
 @handler.add(MessageEvent, message=(ImageMessage))
 def handle_content_message(event):
@@ -160,31 +180,50 @@ def handle_content_message(event):
     dist_path = tempfile_path + '.' + ext
     os.rename(tempfile_path, dist_path)
 
-    im_file = open(dist_path, "rb")
-    im = cv2.imread(im_file)
-    im0 = im.copy()
+   
+    image = Image.open(dist_path)
+    input_image = test_transform(image).unsqueeze(0)
+    with torch.no_grad():
+        output = model(input_image)
+        _, predicted = torch.max(output, 1)
+        probabilities = torch.nn.functional.softmax(output, dim=1)
+        confidence, predicted = torch.max(probabilities, 1)
 
-    results = model(im, size=640)  # reduce size=320 for faster inference
-    print(results)
-    annotator = Annotator(im0, line_width=line_thickness)
+    predicted_label = class_labels[predicted.item()]
+    confidence_score = confidence.item()
+
+    if predicted_label == 'gingivitis':
+        probability_gingivitis = confidence_score * 100
+    else:
+        probability_gingivitis = (1 - confidence_score) * 100
+
+
+    # im_file = open(dist_path, "rb")
+    # im = cv2.imread(im_file)
+    # im0 = im.copy()
+
+    # results = model(im, size=320)  # reduce size=320 for faster inference
+    # print(results)
+    # annotator = Annotator(im0, line_width=line_thickness)
     # Write results 
-    df = results.pandas().xyxy[0]
-    for idx, r in df.iterrows():
-        c = int(r['class'])  # integer class
-        name = r['name']
-        label = f'{name} {r.confidence:.2f}'
-        annotator.box_label((r.xmin, r.ymin, r.xmax, r.ymax), label, color=colors(c, True))
+    # df = results.pandas().xyxy[0]
+    # for idx, r in df.iterrows():
+    #     c = int(r['class'])  # integer class
+    #     name = r['name']
+    #     label = f'{name} {r.confidence:.2f}'
+    #     annotator.box_label((r.xmin, r.ymin, r.xmax, r.ymax), label, color=colors(c, True))
 
-    save_path = str(save_dir + os.path.basename(tempfile_path) + '_result.' + ext) 
-    cv2.imwrite(save_path, im0)
+    # save_path = str(save_dir + os.path.basename(tempfile_path) + '_result.' + ext) 
+    # cv2.imwrite(save_path, im0)
 
-    url = request.url_root + '/' + save_path
+    # url = request.url_root + '/' + save_path
 
     line_bot_api.reply_message(
         event.reply_token, [
-            TextSendMessage(text='Object detection result:'),
-            ImageSendMessage(url,url)
+            TextSendMessage(text='You have a {:.2f}% % probabilitiy to have gingivitis'.format(probability_gingivitis))
+        
         ])
+    
 
 @app.route('/static/<path:path>')
 def send_static_content(path):
@@ -195,4 +234,3 @@ make_static_tmp_dir()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
-
